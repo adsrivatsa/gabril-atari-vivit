@@ -1,33 +1,39 @@
 #!/bin/bash
-#SBATCH --job-name=vivit_train
+#SBATCH --job-name=vivit_no_gaze
 #SBATCH --output=logs/%x-%A_%a.out
 #SBATCH --error=logs/%x-%A_%a.err
-#SBATCH --array=0-3
+#SBATCH --array=0-15%5
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=5
+#SBATCH --gres=shard:12
 #SBATCH --mem=24G
 #SBATCH --time=24:00:00
-#SBATCH --gres=shard:12
 
 ALGOS=("FactorizedViViT" "AuxGazeFactorizedViViT")
-METHODS=("mine" "gabril")
+SEEDS=(100 101 102 103 104 105 106 107)
 
-# Task 0: FactorizedViViT, mine
-# Task 1: FactorizedViViT, gabril
-# Task 2: AuxGazeFactorizedViViT, mine
-# Task 3: AuxGazeFactorizedViViT, gabril
+# Game passed as first argument: sbatch slurm/train-snoopy-no-gaze.slurm ChopperCommand
+GAME=${1:-ChopperCommand}
 
-ALGO_IDX=$((SLURM_ARRAY_TASK_ID / 2))
-METHOD_IDX=$((SLURM_ARRAY_TASK_ID % 2))
+# 16 tasks = 2 algos x 8 seeds
+# Task layout: ALGO_IDX = task/8, SEED_IDX = task%8
+
+ALGO_IDX=$((SLURM_ARRAY_TASK_ID / 8))
+SEED_IDX=$((SLURM_ARRAY_TASK_ID % 8))
 
 ALGO_NAME=${ALGOS[$ALGO_IDX]}
-LOADING_METHOD=${METHODS[$METHOD_IDX]}
+SEED=${SEEDS[$SEED_IDX]}
+
+cd $SLURM_SUBMIT_DIR
+
+# threading fix
+export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 source /scr/adsrivat/gabril-atari-vivit/.venv/bin/activate
 
-echo "Job ID: $SLURM_ARRAY_JOB_ID | Task ID: $SLURM_ARRAY_TASK_ID"
+echo "Current directory: $(pwd)"
 echo "Job started on $(hostname) at $(date)"
-echo "Running Algorithm: $ALGO_NAME with Loading Method: $LOADING_METHOD"
+echo "Running Algorithm: $ALGO_NAME seed=$SEED on Game: $GAME"
 
-srun python train.py --algorithm "$ALGO_NAME" --loading-method "$LOADING_METHOD"
+srun python train.py --algorithm "$ALGO_NAME" --game "$GAME" --seed "$SEED"
