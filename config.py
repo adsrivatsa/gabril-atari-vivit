@@ -2,7 +2,7 @@ import argparse
 import hashlib
 import json
 from dataclasses import asdict, dataclass
-from typing import Tuple
+from typing import Literal, Tuple
 
 
 @dataclass
@@ -49,10 +49,13 @@ class Config:
     num_registers: int
 
     # gaze loss
+    gaze_loss_layers: Literal["all", "first", "last"]
     gaze_loss_mode: str  # "mean_then_kl" or "kl_then_mean"
 
     # class imbalance
-    use_softmax_weighting: bool  # If True, use inverse-frequency class weights to rectify imbalance
+    use_softmax_weighting: (
+        bool  # If True, use inverse-frequency class weights to rectify imbalance
+    )
 
     # hyperparams
     learning_rate: float
@@ -167,6 +170,14 @@ parser.add_argument("--batch-size", type=int, default=32)
 parser.add_argument(
     "--lambda-gaze", type=float, default=0.5, help="Weight for gaze auxiliary loss"
 )
+
+# gaze loss
+parser.add_argument(
+    "--gaze-loss-layers",
+    type=str,
+    choices=["all", "first", "last"],
+    default="last",
+)
 parser.add_argument(
     "--gaze-loss-mode",
     type=str,
@@ -235,6 +246,8 @@ config = Config(
     train_pct=args.train_pct,
     batch_size=args.batch_size,
     lambda_gaze=args.lambda_gaze,
+    # gaze loss
+    gaze_loss_layers=args.gaze_loss_layers,
     gaze_loss_mode=args.gaze_loss_mode,
     weight_decay=args.weight_decay,
     scheduler_factor=args.scheduler_factor,

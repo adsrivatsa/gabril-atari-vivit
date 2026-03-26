@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Literal, Tuple
 
 import torch
 import torch.nn.functional as Fn
@@ -15,7 +15,7 @@ class Attention(nn.Module):
         dim_head: int = 64,
         dropout: float = 0.0,
         use_flash_attn=True,
-        return_last_block_attn: bool = False,
+        return_attn: bool = False,
         mask: torch.Tensor = None,
     ):
         super().__init__()
@@ -25,7 +25,7 @@ class Attention(nn.Module):
         self.p_dropout = dropout
         self.scale = dim_head**-0.5
         no_project = heads == 1 and dim_head == dim
-        self.return_last_block_attn = return_last_block_attn
+        self.return_attn = return_attn
 
         if mask is not None:
             self.register_buffer("mask", mask, persistent=False)
@@ -85,8 +85,8 @@ class Attention(nn.Module):
             lambda t: self.split_emb_dim(t), [q, k, v]
         )  # q, k, v: (B, heads, T, inner_dim / heads)
 
-        last_block_attn = None
-        if self.use_flash_attn and not self.return_last_block_attn:
+        block_attn = None
+        if self.use_flash_attn and not self.return_attn:
             out = self.flash_attn(
                 q, k, v, mask=self.mask
             )  # (B, heads, T, inner_dim / heads)
@@ -103,15 +103,15 @@ class Attention(nn.Module):
 
             attn = Fn.softmax(logits, dim=-1)  # (B, heads, T, T)
 
-            if self.return_last_block_attn:
-                last_block_attn = attn  # (B, heads, T, T)
+            if self.return_attn:
+                block_attn = attn  # (B, heads, T, T)
 
             attn = self.drop(attn)  # (B, heads, T, T)
             out = torch.matmul(attn, v)  # (B, heads, T, inner_dim / heads)
 
         out = self.merge_emb_dim(out)  # (B, T, inner_dim)
         out = self.project(out)  # (B, T, E)
-        return out, last_block_attn
+        return out, block_attn
 
 
 class FeedForward(nn.Module):
@@ -148,28 +148,13 @@ class Transformer(nn.Module):
         mlp_dim: int,
         dropout: float = 0.0,
         use_flash_attn: bool = True,
-        return_last_block_attn: bool = False,
         mask: torch.Tensor = None,
+        attn_return_layers: Literal["all", "first", "last", "none"] = "last",
     ):
         super().__init__()
         self.layers = nn.ModuleList([])
-        for _ in range(depth - 1):
-            self.layers.append(
-                nn.ModuleList(
-                    [
-                        Attention(
-                            dim=dim,
-                            heads=heads,
-                            dim_head=dim_head,
-                            dropout=dropout,
-                            use_flash_attn=use_flash_attn,
-                            return_last_block_attn=False,  # we only want the [CLS] attn from the last block
-                            mask=mask,
-                        ),
-                        FeedForward(dim=dim, hidden_dim=mlp_dim, dropout=dropout),
-                    ]
-                )
-            )
+
+        # first layer
         self.layers.append(
             nn.ModuleList(
                 [
@@ -179,7 +164,43 @@ class Transformer(nn.Module):
                         dim_head=dim_head,
                         dropout=dropout,
                         use_flash_attn=use_flash_attn,
-                        return_last_block_attn=return_last_block_attn,
+                        return_attn=attn_return_layers in ["all", "first"],
+                        mask=mask,
+                    ),
+                    FeedForward(dim=dim, hidden_dim=mlp_dim, dropout=dropout),
+                ]
+            )
+        )
+
+        for _ in range(depth - 2):
+            self.layers.append(
+                nn.ModuleList(
+                    [
+                        Attention(
+                            dim=dim,
+                            heads=heads,
+                            dim_head=dim_head,
+                            dropout=dropout,
+                            use_flash_attn=use_flash_attn,
+                            return_attn=attn_return_layers == "all",
+                            mask=mask,
+                        ),
+                        FeedForward(dim=dim, hidden_dim=mlp_dim, dropout=dropout),
+                    ]
+                )
+            )
+
+        # last layer
+        self.layers.append(
+            nn.ModuleList(
+                [
+                    Attention(
+                        dim=dim,
+                        heads=heads,
+                        dim_head=dim_head,
+                        dropout=dropout,
+                        use_flash_attn=use_flash_attn,
+                        return_attn=attn_return_layers in ["all", "last"],
                         mask=mask,
                     ),
                     FeedForward(dim=dim, hidden_dim=mlp_dim, dropout=dropout),
@@ -193,15 +214,23 @@ class Transformer(nn.Module):
         :param x: (B, T, E)
         :return: (B, T, E)
         """
-        last_block_attn = None
+        block_attns = []
         for attn, ff in self.layers:
-            x_attn, last_block_attn = attn(
+            x_attn, block_attn = attn(
                 x
             )  # x_attn: (B, T, E), last_block_attn: (B, heads, T, T)
+            if block_attn is not None:
+                block_attns.append(block_attn)
             x = x_attn + x  # (B, T, E)
             x = ff(x) + x  # (B, T, E)
         x = self.ln1(x)  # (B, T, E)
-        return x, last_block_attn
+
+        if block_attns:
+            block_attns = torch.stack(block_attns)
+        else:
+            block_attns = None
+
+        return x, block_attns
 
 
 class PatchEmbedding(nn.Module):
@@ -337,8 +366,8 @@ class FactorizedViViT(nn.Module):
         mlp_dim: int,
         dropout: float = 0.0,
         use_flash_attn: bool = True,
-        return_cls_attn: bool = False,
         num_registers: int = 0,
+        attn_return_layers: Literal["all", "first", "last"] = "last",
     ):
         super().__init__()
 
@@ -371,10 +400,10 @@ class FactorizedViViT(nn.Module):
             mlp_dim=mlp_dim,
             dropout=dropout,
             use_flash_attn=use_flash_attn,
-            return_last_block_attn=return_cls_attn,
+            attn_return_layers=attn_return_layers,
         )
 
-        self.unflatten_attn = Rearrange("(b f) h t1 t2 -> b f h t1 t2", f=frames)
+        self.unflatten_attn = Rearrange("l (b f) h t1 t2 -> l b f h t1 t2", f=frames)
         self.unflatten_frames = Rearrange("(b f) n e -> b f n e", f=frames)
         self.temporal_cls_token = nn.Parameter(torch.zeros(1, dim))
         nn.init.trunc_normal_(self.temporal_cls_token, std=0.02)
@@ -394,7 +423,7 @@ class FactorizedViViT(nn.Module):
             mlp_dim=mlp_dim,
             dropout=dropout,
             use_flash_attn=use_flash_attn,
-            return_last_block_attn=False,  # [CLS] vs patch attention only exists in first transformer's attention layers
+            attn_return_layers="none",  # [CLS] vs patch attention only exists in first transformer's attention layers
             # mask=temporal_mask,
         )
 
@@ -419,17 +448,19 @@ class FactorizedViViT(nn.Module):
         x = x + self.spatial_pos_enc  # (B, F, num_spatial_tokens, E)
         x = self.flatten_frames(x)  # (B * F, num_spatial_tokens, E)
 
-        x, last_block_attn = self.spatial_transformer(
+        x, attn = self.spatial_transformer(
             x
-        )  # x: (B * F, num_spatial_tokens, E), last_block_attn: (B * F, SpatialHeads, num_spatial_tokens, num_spatial_tokens)
+        )  # x: (B * F, num_spatial_tokens, E), last_block_attn: (attn_layers, B * F, SpatialHeads, num_spatial_tokens, num_spatial_tokens)
 
         cls_attn = self.unflatten_attn(
-            last_block_attn
-        )  # (B, F, SpatialHeads, num_spatial_tokens, num_spatial_tokens)
-        cls_attn = cls_attn[:, :, :, 0, :]  # (B, F, SpatialHeads, num_spatial_tokens)
+            attn
+        )  # (layers, B, F, SpatialHeads, num_spatial_tokens, num_spatial_tokens)
         cls_attn = cls_attn[
-            :, :, :, 1 : 1 + self.num_patches
-        ]  # (B, F, SpatialHeads, T) — exclude CLS and registers
+            :, :, :, :, 0, :
+        ]  # (layers, B, F, SpatialHeads, num_spatial_tokens)
+        cls_attn = cls_attn[
+            :, :, :, :, 1 : 1 + self.num_patches
+        ]  # (layers, B, F, SpatialHeads, T) — exclude CLS and registers
 
         x = self.unflatten_frames(x)  # (B, F, num_spatial_tokens, E)
         x = x[
@@ -469,8 +500,8 @@ class AuxGazeFactorizedViViT(nn.Module):
         mlp_dim: int,
         dropout: float = 0.0,
         use_flash_attn: bool = True,
-        return_cls_attn: bool = False,
         num_registers: int = 0,
+        attn_return_layers: Literal["all", "first", "last"] = "last",
     ):
         super().__init__()
 
@@ -505,10 +536,10 @@ class AuxGazeFactorizedViViT(nn.Module):
             mlp_dim=mlp_dim,
             dropout=dropout,
             use_flash_attn=use_flash_attn,
-            return_last_block_attn=return_cls_attn,
+            attn_return_layers=attn_return_layers,
         )
 
-        self.unflatten_attn = Rearrange("(b f) h t1 t2 -> b f h t1 t2", f=frames)
+        self.unflatten_attn = Rearrange("l (b f) h t1 t2 -> l b f h t1 t2", f=frames)
         self.unflatten_frames = Rearrange("(b f) n e -> b f n e", f=frames)
         self.temporal_cls_token = nn.Parameter(torch.zeros(1, dim))
         nn.init.trunc_normal_(self.temporal_cls_token, std=0.02)
@@ -528,7 +559,7 @@ class AuxGazeFactorizedViViT(nn.Module):
             mlp_dim=mlp_dim,
             dropout=dropout,
             use_flash_attn=use_flash_attn,
-            return_last_block_attn=False,  # [CLS] vs patch attention only exists in first transformer's attention layers
+            attn_return_layers="none",  # [CLS] vs patch attention only exists in first transformer's attention layers
             # mask=temporal_mask,
         )
 
@@ -554,19 +585,19 @@ class AuxGazeFactorizedViViT(nn.Module):
         x = x + self.spatial_pos_enc  # (B, F, num_spatial_tokens, E)
         x = self.flatten_frames(x)  # (B * F, num_spatial_tokens, E)
 
-        x, last_block_attn = self.spatial_transformer(
+        x, attn = self.spatial_transformer(
             x
-        )  # x: (B * F, num_spatial_tokens, E), last_block_attn: (B * F, SpatialHeads, num_spatial_tokens, num_spatial_tokens)
+        )  # x: (B * F, num_spatial_tokens, E), last_block_attn: (attn_layers, B * F, SpatialHeads, num_spatial_tokens, num_spatial_tokens)
 
         cls_attn = self.unflatten_attn(
-            last_block_attn
-        )  # (B, F, SpatialHeads, num_spatial_tokens, num_spatial_tokens)
-        gaze_attn = cls_attn[
-            :, :, :, 1, :
-        ]  # (B, F, SpatialHeads, num_spatial_tokens) — GAZE token's attention
-        gaze_attn = gaze_attn[
-            :, :, :, 2 : 2 + self.num_patches
-        ]  # (B, F, SpatialHeads, T) — over patches only, exclude registers
+            attn
+        )  # (layers, B, F, SpatialHeads, num_spatial_tokens, num_spatial_tokens)
+        cls_attn = cls_attn[
+            :, :, :, :, 0, :
+        ]  # (layers, B, F, SpatialHeads, num_spatial_tokens)
+        cls_attn = cls_attn[
+            :, :, :, :, 1 : 1 + self.num_patches
+        ]  # (layers, B, F, SpatialHeads, T) — exclude CLS and registers
 
         x = self.unflatten_frames(x)  # (B, F, num_spatial_tokens, E)
         x = x[
@@ -580,7 +611,7 @@ class AuxGazeFactorizedViViT(nn.Module):
         x = x[:, 0, :]  # (B, E)
         x = self.l1(x)  # (B, n_classes)
 
-        return x, gaze_attn
+        return x, cls_attn
 
 
 class FusedGazeFactorizedViViT(nn.Module):

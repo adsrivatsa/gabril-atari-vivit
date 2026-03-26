@@ -163,7 +163,7 @@ def gaze_kl_loss(cls_attn: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
     If gaze_loss_mode == "kl_then_mean": compute KL divergence per head first,
     then average the per-head losses.
 
-    :param cls_attn: (B, F, SpatialHeads, T) — raw CLS attention from model
+    :param cls_attn: (layers, B, F, SpatialHeads, T) — raw CLS attention from model
     :param g: (B, F, GH, GW) — gaze target distribution (already normalized)
     :return: scalar gaze loss
     """
@@ -172,23 +172,24 @@ def gaze_kl_loss(cls_attn: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
 
     if config.gaze_loss_mode == "mean_then_kl":
         # average across heads, then KL
-        attn = cls_attn.mean(dim=2)  # (B, F, T)
-        B, F, _ = attn.shape
+        attn = cls_attn.mean(dim=3)  # (layers, B, F, T)
+        L, B, F, _ = attn.shape
         attn = attn.view(
-            B,
+            -1,
             F,
             GH // config.spatial_patch_size[0],
             GW // config.spatial_patch_size[1],
-        )  # (B, F, PH, PW)
+        )  # (layers * B, F, PH, PW)
         attn = Fn.interpolate(
             attn,
             size=(GH, GW),
             mode="bilinear",
             align_corners=False,
-        )  # (B, F, GH, GW)
+        )  # (layers * B, F, GH, GW)
+        attn = attn.view(L, B, F, GH, GW)  # (layers, B, F, GH, GW)
 
-        attn_flat = attn.reshape(B * F, -1) + eps
-        gaze_flat = g.reshape(B * F, -1) + eps
+        attn_flat = attn.reshape(L * B * F, -1) + eps
+        gaze_flat = g.unsqueeze(0).repeat(L, 1, 1, 1, 1).reshape(L * B * F, -1) + eps
 
         attn_flat = attn_flat / attn_flat.sum(dim=1, keepdim=True)
         gaze_flat = gaze_flat / gaze_flat.sum(dim=1, keepdim=True)
@@ -199,34 +200,34 @@ def gaze_kl_loss(cls_attn: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
         return loss.mean()
 
     elif config.gaze_loss_mode == "kl_then_mean":
-        # KL per head, then average across heads
-        B, F, heads, T = cls_attn.shape
+        L, B, F, heads, T = cls_attn.shape
         pH = GH // config.spatial_patch_size[0]
         pW = GW // config.spatial_patch_size[1]
 
         # reshape each head's tokens to spatial grid and interpolate
-        attn = cls_attn.permute(2, 0, 1, 3)  # (heads, B, F, T)
-        attn = attn.reshape(heads * B, F, pH, pW)
+        attn = cls_attn.permute(0, 3, 1, 2, 4)  # (layers, heads, B, F, T)
+        attn = attn.reshape(L * heads * B, F, pH, pW)
         attn = Fn.interpolate(
             attn,
             size=(GH, GW),
             mode="bilinear",
             align_corners=False,
-        )  # (heads * B, F, GH, GW)
-        attn = attn.reshape(heads, B, F, GH, GW)
+        )  # (layers * heads * B, F, GH, GW)
+        attn = attn.reshape(L, heads, B, F, GH, GW)
 
         # expand gaze target to match heads dimension
-        gaze_exp = g.unsqueeze(0).expand(heads, -1, -1, -1, -1)  # (heads, B, F, GH, GW)
+        gaze_exp = (
+            g.unsqueeze(0).unsqueeze(0).expand(L, heads, -1, -1, -1, -1)
+        )  # (layers, heads, B, F, GH, GW)
 
-        attn_flat = attn.reshape(heads, B * F, -1) + eps
-        gaze_flat = gaze_exp.reshape(heads, B * F, -1) + eps
+        attn_flat = attn.reshape(heads, L * B * F, -1) + eps
+        gaze_flat = gaze_exp.reshape(heads, L * B * F, -1) + eps
 
         attn_flat = attn_flat / attn_flat.sum(dim=2, keepdim=True)
         gaze_flat = gaze_flat / gaze_flat.sum(dim=2, keepdim=True)
 
-        # KL per head: (heads, B*F)
+        # KL per head: (heads, layers * B * F)
         kl = torch.sum(gaze_flat * (torch.log(gaze_flat) - torch.log(attn_flat)), dim=2)
-        # mean over heads, then mean over (batch, frame)
         return kl.mean()
 
     else:
@@ -243,7 +244,7 @@ def calculate_loss(
     with autocast(device_type=device, dtype=torch.float16):
         pred_a, cls_attn = model(
             obs
-        )  # pred_a: (B, n_actions), cls_attn: (B, F, SpatialHeads, T)
+        )  # pred_a: (B, n_actions), cls_attn: (layers, B, F, SpatialHeads, T)
 
         # behavior cloning loss
         policy_loss = Fn.cross_entropy(pred_a, a, weight=class_weights)
@@ -314,8 +315,8 @@ def train(
             mlp_dim=config.mlp_dim,
             dropout=config.dropout,
             use_flash_attn=True,
-            return_cls_attn=True,
             num_registers=config.num_registers,
+            attn_return_layers=config.gaze_loss_layers,
         )
     else:
         model = FactorizedViViT(
@@ -333,8 +334,8 @@ def train(
             mlp_dim=config.mlp_dim,
             dropout=config.dropout,
             use_flash_attn=True,
-            return_cls_attn=True,
             num_registers=config.num_registers,
+            attn_return_layers=config.gaze_loss_layers,
         )
     count_model_params(model, verbose=True)
     model = model.to(device)
