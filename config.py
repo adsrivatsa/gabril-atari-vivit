@@ -51,6 +51,7 @@ class Config:
     # gaze loss
     gaze_loss_layers: Literal["all", "first", "last"]
     gaze_loss_mode: str  # "mean_then_kl" or "kl_then_mean"
+    gaze_loss_heads: Literal["all", "half"]
 
     # class imbalance
     use_softmax_weighting: (
@@ -179,6 +180,9 @@ parser.add_argument(
     default="last",
 )
 parser.add_argument(
+    "--gaze-loss-heads", type=str, choice=["all", "half"], default="all"
+)
+parser.add_argument(
     "--gaze-loss-mode",
     type=str,
     choices=["mean_then_kl", "kl_then_mean"],
@@ -248,6 +252,7 @@ config = Config(
     lambda_gaze=args.lambda_gaze,
     # gaze loss
     gaze_loss_layers=args.gaze_loss_layers,
+    gaze_loss_heads=args.gaze_loss_heads,
     gaze_loss_mode=args.gaze_loss_mode,
     weight_decay=args.weight_decay,
     scheduler_factor=args.scheduler_factor,

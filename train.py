@@ -156,13 +156,6 @@ def evaluate_agent(model: torch.nn.Module, split: Literal["test", "val"]):
 def gaze_kl_loss(cls_attn: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
     """
     Compute gaze regularization loss using KL divergence.
-
-    If gaze_loss_mode == "mean_then_kl": average attention across heads first,
-    then compute a single KL divergence per (batch, frame).
-
-    If gaze_loss_mode == "kl_then_mean": compute KL divergence per head first,
-    then average the per-head losses.
-
     :param cls_attn: (layers, B, F, SpatialHeads, T) — raw CLS attention from model
     :param g: (B, F, GH, GW) — gaze target distribution (already normalized)
     :return: scalar gaze loss
@@ -170,9 +163,19 @@ def gaze_kl_loss(cls_attn: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
     _, _, GH, GW = g.shape
     eps = 1e-8
 
+    if config.gaze_loss_heads == "all":
+        cls_attn_sel = cls_attn
+    elif config.gaze_loss_heads == "half":
+        spatial_heads = cls_attn.shape[3]
+        k = max(1, spatial_heads // 2)
+        head_idx = torch.arange(k, device=cls_attn.device, dtype=torch.long)
+        cls_attn_sel = cls_attn.index_select(3, head_idx)
+    else:
+        raise ValueError(f"Unknown gaze_loss_heads: {config.gaze_loss_heads}")
+
     if config.gaze_loss_mode == "mean_then_kl":
         # average across heads, then KL
-        attn = cls_attn.mean(dim=3)  # (layers, B, F, T)
+        attn = cls_attn_sel.mean(dim=3)  # (layers, B, F, T)
         L, B, F, _ = attn.shape
         attn = attn.view(
             -1,
@@ -200,12 +203,12 @@ def gaze_kl_loss(cls_attn: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
         return loss.mean()
 
     elif config.gaze_loss_mode == "kl_then_mean":
-        L, B, F, heads, T = cls_attn.shape
+        L, B, F, heads, T = cls_attn_sel.shape
         pH = GH // config.spatial_patch_size[0]
         pW = GW // config.spatial_patch_size[1]
 
         # reshape each head's tokens to spatial grid and interpolate
-        attn = cls_attn.permute(0, 3, 1, 2, 4)  # (layers, heads, B, F, T)
+        attn = cls_attn_sel.permute(0, 3, 1, 2, 4)  # (layers, heads, B, F, T)
         attn = attn.reshape(L * heads * B, F, pH, pW)
         attn = Fn.interpolate(
             attn,
