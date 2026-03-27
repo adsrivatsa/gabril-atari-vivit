@@ -12,6 +12,7 @@ import numpy as np
 import torch
 import torch.nn.functional as Fn
 import torch.optim as optim
+from tqdm.std import tqdm
 import wandb
 from torch.amp import GradScaler, autocast
 from torch.nn.utils import clip_grad_norm_
@@ -57,7 +58,7 @@ def evaluate_agent(model: torch.nn.Module, split: Literal["test", "val"]):
     episodes = config.test_episodes if split == "test" else config.val_episodes
 
     model.eval()
-    for ep in range(episodes):
+    for ep in tqdm(range(episodes)):
         seed = config.seed + 1000 * ep
         obs, _ = env.reset(seed=seed)
         done = False
@@ -78,11 +79,11 @@ def evaluate_agent(model: torch.nn.Module, split: Literal["test", "val"]):
             color_obs = color_obs.transpose(2, 0, 1)
 
             with torch.no_grad():
-                pred_a, cls_attn = model(obs)
+                pred_a, cls_attn = model(obs)  # cls_attn: (layers, 1, F, heads, T)
 
                 action = pred_a.argmax(dim=1).item()
 
-                cls_attn = cls_attn.mean(dim=2)
+                cls_attn = cls_attn.mean(dim=(0, 3))  # (1, F, T)
                 cls_attn = cls_attn.view(
                     -1,
                     F,
@@ -135,9 +136,7 @@ def evaluate_agent(model: torch.nn.Module, split: Literal["test", "val"]):
             best_rollout_g, axis=1
         )
 
-        best_rollout_g = np.power(
-            best_rollout_g, 0.5
-        )  # making colors brighter, optional
+        best_rollout_g = np.power(best_rollout_g, 0.5)
         cmap = plt.get_cmap("viridis")
         best_rollout_g = cmap(best_rollout_g)
         best_rollout_g = best_rollout_g[..., :3]  # getting rid of alpha channel
@@ -426,7 +425,7 @@ def train(
         val_generator=val_generator,
     )
 
-    for e in range(start_epoch, config.epochs):
+    for e in tqdm(range(start_epoch, config.epochs)):
         metrics = {
             "train/train_loss": 0,
             "train/train_policy_loss": 0,

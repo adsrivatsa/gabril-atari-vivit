@@ -432,7 +432,7 @@ class FactorizedViViT(nn.Module):
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         :param x: (B, F, C, H, W)
-        :return: (B, num_classes), (B, F, Heads, T)
+        :return: (B, num_classes), (layers, B, F, Heads, T)
         """
         B, F, C, H, W = x.shape
 
@@ -568,7 +568,7 @@ class AuxGazeFactorizedViViT(nn.Module):
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         :param x: (B, F, C, H, W)
-        :return: (B, num_classes), (B, F, Heads, T)
+        :return: (B, num_classes), (layers, B, F, Heads, T)
         """
         B, F, C, H, W = x.shape
 
