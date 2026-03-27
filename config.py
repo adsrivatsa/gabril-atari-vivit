@@ -180,7 +180,7 @@ parser.add_argument(
     default="last",
 )
 parser.add_argument(
-    "--gaze-loss-heads", type=str, choice=["all", "half"], default="all"
+    "--gaze-loss-heads", type=str, choices=["all", "half"], default="all"
 )
 parser.add_argument(
     "--gaze-loss-mode",
