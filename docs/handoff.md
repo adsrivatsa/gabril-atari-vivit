@@ -137,7 +137,7 @@ The comparison that matters is the same model with and without `--no-gaze`, for 
 
 This is the part to read closely. Several things are broken or half-finished, and I would fix the first three before running anything new.
 
-1. **The gaze token is not the token the loss reads.** `AuxGazeFactorizedViViT` returns attention for token index 0 (`vivit.py:595`), which is the policy token, not the gaze token at index 1. Either the gaze token is dead weight or the loss is reading the wrong distribution. Confirm which one you want with Yutai, then make the code match. This is the single most likely reason the auxiliary model does not clearly beat the plain factorized one.
+1. **The gaze token is not the token the loss reads.** `AuxGazeFactorizedViViT` returns attention for token index 0 (`vivit.py:595`), which is the policy token, not the gaze token at index 1. Either the gaze token is dead weight or the loss is reading the wrong distribution. Confirm which one you want with me, then make the code match. This is the single most likely reason the auxiliary model does not clearly beat the plain factorized one.
 
 2. **A short run crashes at the end.** The final block unconditionally loads `best_return.pt` (`train.py:605`), but that file is only written after the first rollout at epoch 100. Any run with `--epochs` below 100 raises `FileNotFoundError`. Guard the load or force a rollout before the schedule ends.
 
@@ -176,7 +176,7 @@ Repos:
 
 ## Suggested first steps
 
-1. Get access to the wandb project and the slide deck. Ask Yutai to add you to the `papaya147-ml` entity or re-export the runs under a lab entity if that is cleaner.
+1. Get access to the wandb project and the slide deck. Ask me to add you to the `papaya147-ml` entity or re-export the runs under a lab entity if that is cleaner.
 2. Download the GABRIL Atari dataset and reproduce one `--no-gaze` ChopperCommand run to confirm the environment works end to end.
 3. Fix the three bugs at the top of the previous section. The gaze-token question is the one that can change your conclusions.
 4. Re-run the 8-seed sweep for one or two games with the fix and check whether the gaze model now separates from the baseline.
@@ -191,7 +191,7 @@ Repos:
 - Atari ViViT experiments: Abhinav Srivatsa.
 - Web-agent gaze work: Danie Craig Kulandai.
 
-Ask Yutai first for anything methodology related, especially the gaze window size, the `lambda`, and the token question. Ask me only if the code misbehaves, and I will try to remember what I did.
+Ask me first for any questions about the code or the experiments, including the gaze window size, the `lambda`, the token question, why a given run exists, and what I tried that did not work. I know this codebase better than these docs do, and I would rather answer a question than have you guess. Yutai is still the person for research direction and decisions that go beyond this repo.
 
 ## References
 

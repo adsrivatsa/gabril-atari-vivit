@@ -50,4 +50,4 @@ There is no `transformers` dependency. The transformer is written from scratch w
 - Atari ViViT experiments: Abhinav Srivatsa.
 - Web-agent gaze work: Danie Craig Kulandai.
 
-Ask Yutai first for anything methodology related.
+Ask me first for any questions about the code or the experiments. Yutai is the person for research direction.
